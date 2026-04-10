@@ -1,6 +1,8 @@
 # Moon Wall King
 
-A realistic lunar surface simulation with realistic lighting, shadows, and physics-based player movement.
+A pseudo-realistic lunar surface simulation with realistic lighting, shadows, and physics-based player movement and terrain. 
+
+Built in ThreeJS, mostly Vibe coded with Minimax and Big Pickle from Opencode.
 
 <img width="1679" height="1322" alt="image" src="https://github.com/user-attachments/assets/16340db3-f02d-4427-8e30-7dc9afb0dad8" />
 
