@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Moon Wall King</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Share+Tech+Mono&display=swap');
+    
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      overflow: hidden;
+      background: #000;
+      font-family: 'Share Tech Mono', monospace;
+    }
+    
+    #canvas-container {
+      width: 100vw;
+      height: 100vh;
+      position: fixed;
+      top: 0;
+      left: 0;
+    }
+    
+    canvas {
+      display: block;
+    }
+    
+    #ui-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 100;
+    }
+    
+    #crosshair {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 4px;
+      height: 4px;
+      background: rgba(255, 255, 255, 0.7);
+      border-radius: 50%;
+      box-shadow: 0 0 4px rgba(255, 255, 255, 0.5);
+    }
+    
+    #coordinates {
+      position: absolute;
+      bottom: 30px;
+      left: 30px;
+      color: #8fbc8f;
+      font-size: 14px;
+      text-shadow: 0 0 10px rgba(143, 188, 143, 0.5);
+      letter-spacing: 1px;
+    }
+    
+    #coordinates .label {
+      color: #5a7a5a;
+      font-size: 11px;
+      text-transform: uppercase;
+    }
+    
+    #coordinates .value {
+      font-family: 'Orbitron', sans-serif;
+      font-size: 16px;
+      font-weight: 700;
+    }
+    
+    #speed-indicator {
+      position: absolute;
+      bottom: 30px;
+      right: 30px;
+      color: #c9a227;
+      font-size: 14px;
+      text-align: right;
+    }
+    
+    #speed-indicator .label {
+      color: #7a6514;
+      font-size: 11px;
+      text-transform: uppercase;
+    }
+    
+    #speed-indicator .value {
+      font-family: 'Orbitron', sans-serif;
+      font-size: 16px;
+      font-weight: 700;
+    }
+    
+    #start-screen {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: radial-gradient(ellipse at center, #0a0a12 0%, #000 100%);
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      z-index: 200;
+      cursor: pointer;
+      pointer-events: auto;
+    }
+    
+    #start-screen h1 {
+      font-family: 'Orbitron', sans-serif;
+      font-size: 48px;
+      color: #c9a227;
+      text-shadow: 0 0 30px rgba(201, 162, 39, 0.6),
+                   0 0 60px rgba(201, 162, 39, 0.3);
+      margin-bottom: 20px;
+      letter-spacing: 8px;
+    }
+    
+    #start-screen p {
+      color: #5a7a5a;
+      font-size: 14px;
+      letter-spacing: 2px;
+    }
+    
+    #start-screen .controls {
+      margin-top: 40px;
+      color: #3a4a3a;
+      font-size: 12px;
+      text-align: center;
+      line-height: 2;
+    }
+    
+    #start-screen.hidden {
+      display: none;
+    }
+    
+    #compass {
+      position: absolute;
+      top: 30px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: #8fbc8f;
+      font-size: 12px;
+      letter-spacing: 3px;
+    }
+
+    /* ---- Debug fly overlay ---- */
+    #fly-hud {
+      display: none;
+      position: fixed;
+      top: 0; left: 0; width: 100%; height: 100%;
+      pointer-events: none;
+      z-index: 110;
+    }
+    #fly-hud.active { display: block; }
+
+    #fly-badge {
+      position: absolute;
+      top: 16px; left: 50%;
+      transform: translateX(-50%);
+      background: rgba(255, 80, 40, 0.18);
+      border: 1px solid rgba(255, 80, 40, 0.5);
+      color: #ff7050;
+      font-family: 'Orbitron', sans-serif;
+      font-size: 11px;
+      letter-spacing: 3px;
+      padding: 4px 14px;
+      border-radius: 2px;
+    }
+    #fly-info {
+      position: absolute;
+      bottom: 30px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(255,120,80,0.8);
+      font-size: 12px;
+      text-align: center;
+      line-height: 2;
+      letter-spacing: 1px;
+    }
+    #fly-info .fly-val {
+      font-family: 'Orbitron', sans-serif;
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    /* ---- Velocity / physics panel (top-right, always visible) ---- */
+    #vel-panel {
+      position: absolute;
+      top: 20px;
+      right: 20px;
+      color: rgba(140, 200, 255, 0.85);
+      font-size: 12px;
+      letter-spacing: 1px;
+      line-height: 1.8;
+      text-align: right;
+      text-shadow: 0 0 8px rgba(100, 180, 255, 0.4);
+    }
+    #vel-panel .vl { color: rgba(80, 130, 180, 0.7); font-size: 10px; text-transform: uppercase; }
+    #vel-panel .vv { font-family: 'Orbitron', sans-serif; font-size: 13px; font-weight: 700; }
+    #vel-panel .pos  { color: #6fcf97; }
+    #vel-panel .neg  { color: #eb5757; }
+    #vel-panel .rcs-on  { color: #56ccf2; text-shadow: 0 0 8px rgba(86, 204, 242, 0.8); }
+    #vel-panel .rcs-off { color: rgba(80, 130, 180, 0.5); }
+  </style>
+</head>
+<body>
+  <div id="canvas-container"></div>
+  
+  <div id="ui-overlay">
+    <div id="crosshair"></div>
+    <div id="compass">N</div>
+    <div id="coordinates">
+      <div class="label">Position</div>
+      <div class="value" id="coords-value">0.00° N, 0.00° E</div>
+    </div>
+    <div id="speed-indicator">
+      <div class="label">Speed</div>
+      <div class="value" id="speed-value">0.0 m/s</div>
+    </div>
+    <div id="vel-panel">
+      <div><span class="vl">alt &nbsp;</span> <span class="vv" id="vp-alt">0.0</span> u</div>
+      <div><span class="vl">vert</span> <span class="vv" id="vp-vert">0.0</span> u/s</div>
+      <div><span class="vl">horiz</span> <span class="vv" id="vp-horiz">0.0</span> u/s</div>
+      <div><span class="vl">total</span> <span class="vv" id="vp-total">0.0</span> u/s</div>
+      <div><span class="vl">rcs &nbsp;</span> <span class="vv rcs-off" id="vp-rcs">OFF</span></div>
+      <div><span class="vl">damp &nbsp;</span> <span class="vv rcs-off" id="vp-damp">OFF</span></div>
+    </div>
+  </div>
+  
+  <!-- Debug fly mode overlay (shown when Tab toggles fly mode) -->
+  <div id="fly-hud">
+    <div id="fly-badge">DEBUG FLY</div>
+    <div id="fly-info">
+      <span class="label">Alt</span> <span class="fly-val" id="fly-alt">0</span> u
+      &nbsp;·&nbsp;
+      <span class="label">Dist</span> <span class="fly-val" id="fly-dist">0</span> u
+      &nbsp;·&nbsp;
+      <span class="label">Speed</span> <span class="fly-val" id="fly-speed">100</span> u/s
+      <br>
+      <span style="opacity:0.5; font-size:11px;">
+        WASD · Space/Ctrl up/down · Q/E roll · Scroll speed · Shift ×5 · Tab exit · X wireframe
+      </span>
+    </div>
+  </div>
+
+  <div id="start-screen">
+    <h1>MOON WALL KING</h1>
+    <p>Click to begin exploration</p>
+    <div class="controls">
+      WASD — Move<br>
+      MOUSE — Look<br>
+      SHIFT — Sprint<br>
+      SPACE — Jump<br>
+      TAB — Toggle fly debug<br>
+      T — RCS damping (velocity kill)<br>
+      X — Wireframe mode<br>
+      L — Flashlight
+    </div>
+  </div>
+  
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
