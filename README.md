@@ -41,7 +41,20 @@ Built in ThreeJS, mostly Vibe coded with Minimax and Big Pickle from Opencode.
 - **Scroll wheel** — Adjust speed
 - **Tab** — Return to player mode
 
-## Features
+## Running
+
+```bash
+npm install
+npm run dev
+```
+
+## Push to GitHub
+
+```bash
+git add .
+git commit -m "Your message"
+git push
+```
 
 - Cascaded shadow maps for proximity-based shadows
 - RCS (Reaction Control System) force-based movement with gravity
