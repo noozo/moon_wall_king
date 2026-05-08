@@ -102,7 +102,7 @@ export class DustSystem {
    * @param {THREE.Vector3} N    Moon-local surface normal (unit vector)
    */
   spawnStep(pos, N) {
-    this._spawn(pos, N, STEP_PARTICLES, 0.45 + Math.random() * 0.25);
+    this._spawn(pos, N, STEP_PARTICLES, 1.8 + Math.random() * 0.6);
   }
 
   /**

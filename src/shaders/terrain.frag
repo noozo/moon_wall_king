@@ -197,7 +197,7 @@ void main() {
   // Hemisphere scatter: fills bump-shadowed faces on the dayside.  Not blocked
   // by CSM because it represents light scattered across the wider sky dome, not
   // the direct sun beam.  Matches the rock shader's wrapped-diffuse approach.
-  float hemi = moonNormSun * 0.08;
+  float hemi = moonNormSun * 0.18;
 
   float earthFace  = max(dot(bN, eDir), 0.0);
 
