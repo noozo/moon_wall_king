@@ -1,165 +1,214 @@
 /**
- * TrajectoryPredictor — ballistic arc visualiser for RCS mode.
+ * TrajectoryPredictor — parabolic arc or Keplerian orbital ellipse.
  *
- * When RCS is active, forward-simulates the player's current position and
- * velocity under pure lunar gravity (inverse-square, no thrusters) to show
- * an 8-second predicted flight path as a dotted arc plus a landing marker.
+ * When RCS is active, determines which of two visuals to show:
  *
- * Simulation matches PhysicsBody.integrate() exactly:
- *   • inverse-square gravity only (no thrust, no Earth gravity)
- *   • semi-implicit Euler  (velocity first, then position)
- *   • terrain collision stops the arc and places the landing marker
+ *   Sub-orbital  (v < v_orb, or orbit periapsis inside Moon):
+ *     Forward-simulates 200 steps × 0.2 s = 40 s under lunar gravity + current
+ *     thrust.  Shows a dotted arc and an orange landing marker.
  *
- * All positions are in Moon-local space; both objects are parented to
- * moonGroup so they move with Moon spin automatically.
+ *   Orbital  (v ≥ v_orb AND periapsis above Moon surface):
+ *     Computes the Keplerian ellipse analytically in O(1) — no simulation.
+ *     Shows a green ellipse loop.  Eccentricity is indicated by colour:
+ *       near-circular (e < 0.3): bright green
+ *       elliptical    (e < 0.8): yellow-green
+ *       highly eccentric        : orange (orbit barely clears surface)
+ *
+ * All positions are in Moon-local space; objects are parented to moonGroup.
  */
 
 import * as THREE from 'three';
 
-// ---------------------------------------------------------------------------
-// Simulation parameters
-// ---------------------------------------------------------------------------
+// ── Configuration ────────────────────────────────────────────────────────────
 
-const MOON_GRAV_SURFACE = 1.62;   // game-units / s²  (must match PlayerController)
-const SIM_STEPS         = 80;     // number of prediction steps
-const SIM_DT            = 0.1;    // seconds per step  → 8 s prediction window
-const EYE_HEIGHT        = 1.8;    // game-units  (must match PhysicsBody)
+const MOON_GRAV = 1.62;      // game-units / s²
+const ARC_STEPS = 200;       // simulation steps for sub-orbital arc
+const ARC_DT    = 0.20;      // seconds per step → 40 s lookahead
+const EYE_HEIGHT = 1.8;      // must match PhysicsBody default
+const ORBIT_PTS  = 96;       // vertices on the Keplerian ellipse
 
-// ---------------------------------------------------------------------------
-// Scratch vectors — zero allocations in update()
-// ---------------------------------------------------------------------------
+// ── Module-level scratch — zero allocations in update() ──────────────────────
 
-const _pos    = new THREE.Vector3();
-const _vel    = new THREE.Vector3();
-const _N      = new THREE.Vector3();
-const _accel  = new THREE.Vector3();
-const _thrust = new THREE.Vector3();
+const _pos      = new THREE.Vector3();
+const _vel      = new THREE.Vector3();
+const _N        = new THREE.Vector3();
+const _accel    = new THREE.Vector3();
+const _thrust   = new THREE.Vector3();
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+// Keplerian
+const _h        = new THREE.Vector3();   // angular momentum  h = r × v
+const _eVec     = new THREE.Vector3();   // eccentricity vector
+const _pDir     = new THREE.Vector3();   // periapsis unit direction
+const _qDir     = new THREE.Vector3();   // perpendicular in orbital plane
+const _hN       = new THREE.Vector3();   // unit angular momentum
+const _orbCen   = new THREE.Vector3();   // ellipse centre (world-space)
+const _arbDir   = new THREE.Vector3();   // scratch for degenerate circular case
+
+// ── Helper ───────────────────────────────────────────────────────────────────
 
 function makeCircleSprite(size = 64) {
-  const canvas = document.createElement('canvas');
-  canvas.width  = size;
-  canvas.height = size;
-  const ctx = canvas.getContext('2d');
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const ctx = c.getContext('2d');
   ctx.beginPath();
   ctx.arc(size / 2, size / 2, size / 2 - 2, 0, Math.PI * 2);
   ctx.fillStyle = '#ffffff';
   ctx.fill();
-  return new THREE.CanvasTexture(canvas);
+  return new THREE.CanvasTexture(c);
 }
 
-// ---------------------------------------------------------------------------
+// ── TrajectoryPredictor ───────────────────────────────────────────────────────
 
 export class TrajectoryPredictor {
-  /**
-   * @param {object}        terrain     TerrainSystem — getHeightAt(nx,ny,nz)
-   * @param {number}        moonRadius
-   * @param {THREE.Group}   moonGroup   Parent group; positions are Moon-local.
-   */
   constructor(terrain, moonRadius, moonGroup) {
     this._terrain    = terrain;
     this._moonRadius = moonRadius;
+    this._GM         = MOON_GRAV * moonRadius * moonRadius;
 
-    // ── Arc (Points) ─────────────────────────────────────────────────────────
-    const posArr = new Float32Array(SIM_STEPS * 3);
-    const geo    = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
-    geo.setDrawRange(0, 0);
+    // ── Sub-orbital arc (Points) ──────────────────────────────────────────────
+    const arcPosArr = new Float32Array(ARC_STEPS * 3);
+    const arcGeo    = new THREE.BufferGeometry();
+    this._arcPosBuf = new THREE.BufferAttribute(arcPosArr, 3)
+                        .setUsage(THREE.DynamicDrawUsage);
+    arcGeo.setAttribute('position', this._arcPosBuf);
+    arcGeo.setDrawRange(0, 0);
 
     this._sprite = makeCircleSprite();
-
-    const arcMat = new THREE.PointsMaterial({
-      size:           0.3,
-      map:            this._sprite,
+    this._arc    = new THREE.Points(arcGeo, new THREE.PointsMaterial({
+      size:            0.3,
+      map:             this._sprite,
       sizeAttenuation: true,
-      transparent:    true,
-      opacity:        0.80,
-      depthWrite:     false,
-      alphaTest:      0.1,
-    });
-
-    this._arc              = new THREE.Points(geo, arcMat);
+      transparent:     true,
+      opacity:         0.80,
+      depthWrite:      false,
+      alphaTest:       0.1,
+    }));
     this._arc.frustumCulled = false;
     this._arc.visible       = false;
     moonGroup.add(this._arc);
 
-    // ── Landing marker (Mesh) ─────────────────────────────────────────────────
-    const markerGeo = new THREE.SphereGeometry(0.35, 8, 6);
-    const markerMat = new THREE.MeshBasicMaterial({ color: 0xff6600 });
-
-    this._marker              = new THREE.Mesh(markerGeo, markerMat);
+    // ── Landing marker ────────────────────────────────────────────────────────
+    this._marker = new THREE.Mesh(
+      new THREE.SphereGeometry(0.35, 8, 6),
+      new THREE.MeshBasicMaterial({ color: 0xff6600 }),
+    );
     this._marker.frustumCulled = false;
     this._marker.visible       = false;
     moonGroup.add(this._marker);
+
+    // ── Orbital ellipse (LineLoop) ────────────────────────────────────────────
+    const orbPosArr   = new Float32Array(ORBIT_PTS * 3);
+    const orbGeo      = new THREE.BufferGeometry();
+    this._orbPosBuf   = new THREE.BufferAttribute(orbPosArr, 3)
+                          .setUsage(THREE.DynamicDrawUsage);
+    orbGeo.setAttribute('position', this._orbPosBuf);
+
+    this._orbitMat  = new THREE.LineBasicMaterial({
+      color:       0x44ff88,
+      transparent: true,
+      opacity:     0.75,
+      depthWrite:  false,
+    });
+    this._orbit              = new THREE.LineLoop(orbGeo, this._orbitMat);
+    this._orbit.frustumCulled = false;
+    this._orbit.visible       = false;
+    moonGroup.add(this._orbit);
   }
 
-  // ---------------------------------------------------------------------------
-  // Public API
-  // ---------------------------------------------------------------------------
+  // ── Public API ───────────────────────────────────────────────────────────────
 
-  /**
-   * Call once per frame from the main loop (player mode only).
-   * Hides the arc when RCS is off; otherwise re-simulates from the player's
-   * current state and updates the geometry in-place.
-   *
-   * @param {import('./PlayerController').PlayerController} player
-   */
   update(player) {
     if (!player.rcsEnabled) {
       this._arc.visible    = false;
       this._marker.visible = false;
+      this._orbit.visible  = false;
       return;
     }
 
-    // Snapshot current physics state (Moon-local space).
     _pos.copy(player.body.position);
     _vel.copy(player.body.velocity);
+    const r  = _pos.length();
+    const GM = this._GM;
 
-    // Freeze the current thrust vector for the whole prediction window.
-    // This shows "where I'll go if I keep thrusting exactly like this."
+    // Specific orbital energy: ε = v²/2 − GM/r.
+    // ε < 0 → bound orbit; ε ≥ 0 → escape.
+    const eps = _vel.lengthSq() * 0.5 - GM / r;
+
+    if (eps < 0) {
+      // Bound orbit candidate — check whether periapsis clears the surface.
+      const a = -GM / (2 * eps);                        // semi-major axis > 0
+
+      _h.crossVectors(_pos, _vel);                       // angular momentum
+
+      // Eccentricity vector  e = (v × h)/GM − r̂
+      _eVec.crossVectors(_vel, _h).divideScalar(GM);
+      _N.copy(_pos).normalize();
+      _eVec.sub(_N);
+      const e = _eVec.length();
+
+      const rPeriapsis = a * (1 - e);
+
+      if (rPeriapsis > this._moonRadius * 1.005) {
+        // Periapsis clears the Moon — show orbital ellipse.
+        this._showOrbit(a, e, r);
+        this._arc.visible    = false;
+        this._marker.visible = false;
+        return;
+      }
+    }
+
+    // Sub-orbital (or orbit that would intersect the surface) — simulate arc.
+    this._showArc(player);
+    this._orbit.visible = false;
+  }
+
+  dispose() {
+    this._arc.geometry.dispose();
+    this._arc.material.dispose();
+    this._sprite.dispose();
+    this._marker.geometry.dispose();
+    this._marker.material.dispose();
+    this._orbit.geometry.dispose();
+    this._orbitMat.dispose();
+  }
+
+  // ── Private ──────────────────────────────────────────────────────────────────
+
+  _showArc(player) {
     player.getThrustVector(_thrust);
 
-    const posArr = this._arc.geometry.attributes.position.array;
-    const R      = this._moonRadius;
-
+    const R   = this._moonRadius;
+    const arr = this._arcPosBuf.array;
     let count  = 0;
     let landed = false;
-    let landX  = 0, landY = 0, landZ = 0;
+    let landX = 0, landY = 0, landZ = 0;
 
-    for (let i = 0; i < SIM_STEPS; i++) {
-      // Inverse-square lunar gravity (radially inward) + frozen RCS thrust.
+    for (let i = 0; i < ARC_STEPS; i++) {
       const dist = _pos.length();
       _N.copy(_pos).divideScalar(dist);
-      const g = MOON_GRAV_SURFACE * (R / dist) * (R / dist);
+      const g = MOON_GRAV * (R / dist) * (R / dist);
       _accel.copy(_N).multiplyScalar(-g).add(_thrust);
 
-      // Semi-implicit Euler — matches PhysicsBody.integrate().
-      _vel.addScaledVector(_accel, SIM_DT);
-      _pos.addScaledVector(_vel,   SIM_DT);
+      _vel.addScaledVector(_accel, ARC_DT);
+      _pos.addScaledVector(_vel,   ARC_DT);
       _N.copy(_pos).normalize();
 
-      // Terrain collision — stop the arc and mark the landing point.
       const terrH = this._terrain.getHeightAt(_N.x, _N.y, _N.z);
-      const minR  = R + terrH + EYE_HEIGHT;
-
-      if (_pos.length() <= minR) {
-        landX  = _N.x * (R + terrH);
-        landY  = _N.y * (R + terrH);
-        landZ  = _N.z * (R + terrH);
+      if (_pos.length() <= R + terrH + EYE_HEIGHT) {
+        landX = _N.x * (R + terrH);
+        landY = _N.y * (R + terrH);
+        landZ = _N.z * (R + terrH);
         landed = true;
         break;
       }
 
-      posArr[i * 3]     = _pos.x;
-      posArr[i * 3 + 1] = _pos.y;
-      posArr[i * 3 + 2] = _pos.z;
+      arr[i * 3]     = _pos.x;
+      arr[i * 3 + 1] = _pos.y;
+      arr[i * 3 + 2] = _pos.z;
       count++;
     }
 
-    this._arc.geometry.attributes.position.needsUpdate = true;
+    this._arcPosBuf.needsUpdate = true;
     this._arc.geometry.setDrawRange(0, count);
     this._arc.visible = count > 0;
 
@@ -171,11 +220,51 @@ export class TrajectoryPredictor {
     }
   }
 
-  dispose() {
-    this._arc.geometry.dispose();
-    this._arc.material.dispose();
-    this._sprite.dispose();
-    this._marker.geometry.dispose();
-    this._marker.material.dispose();
+  _showOrbit(a, e, r) {
+    // _h and _eVec are already computed in update().
+    // _N holds r̂ (unit position).
+
+    // Orbital plane unit normal.
+    _hN.copy(_h).normalize();
+
+    // Periapsis direction (pDir) — direction of eccentricity vector.
+    if (e < 1e-4) {
+      // Near-circular: eccentricity vector is ~zero, pick arbitrary direction
+      // perpendicular to the angular momentum.
+      _arbDir.set(1, 0, 0);
+      if (Math.abs(_hN.dot(_arbDir)) > 0.9) _arbDir.set(0, 1, 0);
+      _pDir.crossVectors(_hN, _arbDir).normalize();
+    } else {
+      _pDir.copy(_eVec).normalize();
+    }
+
+    // Second basis vector in orbital plane.
+    _qDir.crossVectors(_hN, _pDir).normalize();
+
+    // Semi-minor axis.
+    const eSafe = Math.min(e, 0.9999);
+    const b     = a * Math.sqrt(1 - eSafe * eSafe);
+
+    // Ellipse centre is displaced from the focus (Moon centre) anti-periapsis
+    // by  a·e:  centre = −pDir · a·e
+    _orbCen.copy(_pDir).multiplyScalar(-a * e);
+
+    // Choose orbit-line colour by eccentricity.
+    if      (e < 0.3) this._orbitMat.color.setHex(0x44ff88);  // green — near-circular
+    else if (e < 0.8) this._orbitMat.color.setHex(0xaaff44);  // yellow-green — elliptical
+    else              this._orbitMat.color.setHex(0xff8844);   // orange — highly eccentric
+
+    const arr = this._orbPosBuf.array;
+    for (let i = 0; i < ORBIT_PTS; i++) {
+      const theta = (i / ORBIT_PTS) * Math.PI * 2;
+      const cos   = Math.cos(theta);
+      const sin   = Math.sin(theta);
+      arr[i * 3]     = _orbCen.x + a * cos * _pDir.x + b * sin * _qDir.x;
+      arr[i * 3 + 1] = _orbCen.y + a * cos * _pDir.y + b * sin * _qDir.y;
+      arr[i * 3 + 2] = _orbCen.z + a * cos * _pDir.z + b * sin * _qDir.z;
+    }
+
+    this._orbPosBuf.needsUpdate = true;
+    this._orbit.visible = true;
   }
 }
