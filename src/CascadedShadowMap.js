@@ -4,16 +4,20 @@
  * Implements Cascaded Shadow Maps (CSM) for the directional sun light.
  * Reference: https://learnopengl.com/Guest-Articles/2021/CSM
  *
+ * Stable cascades: frustum slices are bounded by a rotation-invariant bounding
+ * sphere so the shadow frustum size stays constant as the camera rotates.
+ * Texel snapping moves the shadow camera only in whole-texel increments,
+ * eliminating sub-texel shimmer as the camera translates.
+ *
  * Algorithm (per frame):
  *   For each of NUM_CASCADES sub-frustums:
  *     1. Compute the 8 world-space corners of the view frustum slice [near_i, far_i]
- *        by inverting (projMatrix * viewMatrix) applied to the NDC cube corners.
- *     2. Average the corners to find the frustum centre.
- *     3. Position the shadow camera at centre + sunDir * SHADOW_CAM_DIST,
+ *        directly from the camera's FOV and aspect ratio (no clone).
+ *     2. Fit a bounding sphere around the 8 corners (rotation-invariant).
+ *     3. Position the shadow camera at sphere-centre + sunDir * SHADOW_CAM_DIST,
  *        looking toward the centre.
- *     4. Transform all 8 corners into light view space; find the AABB.
- *     5. Build a tight orthographic projection from that AABB, expanded in Z
- *        by Z_MULT to include geometry outside the view that can still cast shadows.
+ *     4. Build a fixed-size orthographic projection from the sphere radius.
+ *     5. Texel-snap the shadow camera so it only moves in whole-texel steps.
  *     6. Render shadow-caster objects (layer 1 = rocks) into a depth texture.
  *     7. Compute the bias-adjusted shadow matrix:
  *          shadowMatrix = biasMatrix × projMatrix × viewMatrix
@@ -58,20 +62,9 @@ const _biasMatrix = new THREE.Matrix4().set(
   0,   0,   0,   1
 );
 
-// All 8 NDC cube corner points
-const _NDC_CORNERS = (() => {
-  const pts = [];
-  for (let x = -1; x <= 1; x += 2)
-    for (let y = -1; y <= 1; y += 2)
-      for (let z = -1; z <= 1; z += 2)
-        pts.push(new THREE.Vector4(x, y, z, 1));
-  return pts;
-})();
-
-const _invPV  = new THREE.Matrix4();
-const _ndcPt  = new THREE.Vector4();
 const _center = new THREE.Vector3();
 const _lvPt   = new THREE.Vector3();
+const _tmpUp  = new THREE.Vector3();
 
 // ── CascadedShadowMap ────────────────────────────────────────────────────────
 
@@ -169,57 +162,55 @@ export class CascadedShadowMap {
    * camera's view sub-frustum [near, far] and update shadowMatrices[idx].
    */
   _fitCascade(viewCamera, sunDirNorm, near, far, idx) {
-    // 1. Get the 8 world-space corners for this frustum slice.
+    // 1. World-space frustum corners (no allocation)
     this._getFrustumCornersWorld(viewCamera, near, far, this._corners);
 
-    // 2. Frustum centre = average of all 8 corners.
+    // 2. Bounding sphere — rotation-stable: radius doesn't change when the
+    //    camera rotates in place, so shadow frustum size stays constant.
     _center.set(0, 0, 0);
     for (const c of this._corners) _center.add(c);
     _center.divideScalar(8);
+    let radius = 0;
+    for (const c of this._corners) {
+      const d = _center.distanceTo(c);
+      if (d > radius) radius = d;
+    }
+    // Round up to 1/64-unit grid to suppress float noise in radius.
+    radius = Math.ceil(radius * 64) / 64;
 
-    // 3. Shadow camera: positioned along sun direction from centre.
-    //    Use a stable up-vector — if sunDir is close to world-Y (sun overhead),
-    //    fall back to world-X to avoid lookAt gimbal lock.
+    // 3. Shadow camera — positioned along sun direction from sphere centre.
     const cam = this._shadowCams[idx];
+    if (Math.abs(sunDirNorm.y) > 0.9) _tmpUp.set(1, 0, 0);
+    else                               _tmpUp.set(0, 1, 0);
     cam.position.copy(_center).addScaledVector(sunDirNorm, SHADOW_CAM_DIST);
-    const up = (Math.abs(sunDirNorm.y) > 0.9)
-      ? new THREE.Vector3(1, 0, 0)
-      : new THREE.Vector3(0, 1, 0);
-    cam.up.copy(up);
+    cam.up.copy(_tmpUp);
     cam.lookAt(_center);
     cam.updateMatrixWorld();
 
-    // 4. AABB of frustum corners in light-view space.
-    let minX = Infinity,  maxX = -Infinity;
-    let minY = Infinity,  maxY = -Infinity;
-    let minZ = Infinity,  maxZ = -Infinity;
-
-    for (const c of this._corners) {
-      _lvPt.copy(c).applyMatrix4(cam.matrixWorldInverse);
-      if (_lvPt.x < minX) minX = _lvPt.x;
-      if (_lvPt.x > maxX) maxX = _lvPt.x;
-      if (_lvPt.y < minY) minY = _lvPt.y;
-      if (_lvPt.y > maxY) maxY = _lvPt.y;
-      if (_lvPt.z < minZ) minZ = _lvPt.z;
-      if (_lvPt.z > maxZ) maxZ = _lvPt.z;
-    }
-
-    // 5. Set tight orthographic frustum, extended in Z for out-of-view casters.
-    //    Three.js camera space: forward = -Z.  Objects in front are at z < 0.
-    //    near = -maxZ  (closest to camera, least negative z)
-    //    far  = -minZ  (farthest from camera, most negative z)
-    const rawNear = -maxZ;
-    const rawFar  = -minZ;
-    cam.left   = minX;
-    cam.right  = maxX;
-    cam.top    = maxY;
-    cam.bottom = minY;
-    cam.near   = Math.max(0.1, rawNear / Z_MULT);
-    cam.far    = rawFar * Z_MULT;
+    // 4. Fixed-size orthographic frustum from sphere radius (same size every
+    //    frame for a given cascade when the camera only rotates).
+    cam.left   = -radius;
+    cam.right  =  radius;
+    cam.top    =  radius;
+    cam.bottom = -radius;
+    cam.near   = Math.max(0.1, (SHADOW_CAM_DIST - radius) / Z_MULT);
+    cam.far    = (SHADOW_CAM_DIST + radius) * Z_MULT;
     cam.updateProjectionMatrix();
 
-    // 6. Shadow matrix: biasMatrix × projMatrix × viewMatrix
-    //    Maps world-space position → [0,1]³ UV + depth.
+    // 5. Texel-snap: shift the shadow camera in its local XY plane so the
+    //    world origin always maps to the same shadow-map texel.  Eliminates
+    //    sub-texel shimmer as the camera translates between frames.
+    const texelSize = (2.0 * radius) / MAP_SIZE;
+    _lvPt.set(0, 0, 0).applyMatrix4(cam.matrixWorldInverse);
+    const snapX = Math.round(_lvPt.x / texelSize) * texelSize - _lvPt.x;
+    const snapY = Math.round(_lvPt.y / texelSize) * texelSize - _lvPt.y;
+    const e = cam.matrixWorld.elements;
+    cam.position.x += e[0] * snapX + e[4] * snapY;
+    cam.position.y += e[1] * snapX + e[5] * snapY;
+    cam.position.z += e[2] * snapX + e[6] * snapY;
+    cam.updateMatrixWorld();
+
+    // 6. Final shadow matrix: biasMatrix × projMatrix × viewMatrix
     this.shadowMatrices[idx]
       .copy(_biasMatrix)
       .multiply(cam.projectionMatrix)
@@ -230,24 +221,21 @@ export class CascadedShadowMap {
    * Compute the 8 world-space corners of the camera's view frustum sliced
    * between [near, far] and write them into the `out` array.
    *
-   * Technique: transform the 8 NDC cube corners through the inverse of
-   * (projMatrix × viewMatrix) with near/far overridden for this slice.
+   * Derived directly from the camera's FOV and aspect ratio — no clone needed.
+   * In Three.js camera space, forward = −Z, so a point at view-distance z is
+   * at (x, y, −z).  applyMatrix4(camera.matrixWorld) converts to world space.
    */
   _getFrustumCornersWorld(camera, near, far, out) {
-    // Clone camera to override near/far without mutating the original.
-    // Allocation here is acceptable — called only NUM_CASCADES (3) times/frame.
-    const sliceCam = camera.clone();
-    sliceCam.near = near;
-    sliceCam.far  = far;
-    sliceCam.updateProjectionMatrix();
-
-    _invPV
-      .multiplyMatrices(sliceCam.projectionMatrix, sliceCam.matrixWorldInverse)
-      .invert();
-
-    for (let i = 0; i < 8; i++) {
-      _ndcPt.copy(_NDC_CORNERS[i]).applyMatrix4(_invPV);
-      out[i].set(_ndcPt.x / _ndcPt.w, _ndcPt.y / _ndcPt.w, _ndcPt.z / _ndcPt.w);
+    const tanH   = Math.tan(camera.fov * Math.PI / 360);
+    const aspect = camera.aspect;
+    let k = 0;
+    for (const z of [near, far]) {
+      const h  = tanH * z;
+      const w  = h * aspect;
+      out[k++].set(-w, -h, -z).applyMatrix4(camera.matrixWorld);
+      out[k++].set( w, -h, -z).applyMatrix4(camera.matrixWorld);
+      out[k++].set(-w,  h, -z).applyMatrix4(camera.matrixWorld);
+      out[k++].set( w,  h, -z).applyMatrix4(camera.matrixWorld);
     }
   }
 

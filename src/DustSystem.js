@@ -36,7 +36,7 @@ void main() {
   vAlpha = aAlpha;
   vec4 mv = modelViewMatrix * vec4(position, 1.0);
   // Start at 3.5 px, shrink to 0.5 px as the particle ages.
-  gl_PointSize = max(0.5, (1.0 - aAlpha) * 3.5);
+  gl_PointSize = max(0.5, (1.0 - aAlpha) * 10.0);
   gl_Position  = projectionMatrix * mv;
 }
 `;

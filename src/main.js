@@ -64,6 +64,21 @@ const MOON_SPIN_RATE   = (2 * Math.PI) / MOON_SPIN_PERIOD; // radians / real sec
 const DEBUG = false;
 
 // ---------------------------------------------------------------------------
+// Per-frame scratch — allocated once at startup, reused every render frame.
+// Avoids GC pressure from short-lived heap objects in the hot render path.
+// ---------------------------------------------------------------------------
+
+const _scratch_sunDir   = new THREE.Vector3();
+const _scratch_camDir   = new THREE.Vector3();
+const _scratch_zeroVec  = new THREE.Vector3();   // immutable zero — never write to it
+const _scratch_identMat = new THREE.Matrix4();   // identity — never write to it
+const _scratch_moonCam  = new THREE.Vector3();   // worldToLocal result
+const _scratch_dustPos  = new THREE.Vector3();   // dust spawn position
+
+/** Eye height must match PhysicsBody constructor default (eyeHeight = 1.8). */
+const EYE_HEIGHT = 1.8;
+
+// ---------------------------------------------------------------------------
 // Fly HUD helpers
 // ---------------------------------------------------------------------------
 
@@ -385,27 +400,25 @@ async function boot() {
 
       // 6. Render CSM shadow passes.
       //    Must happen after sun direction is known and before composer.render().
-      const sunDirNorm = sun.getPosition().clone().normalize();
-      csm.renderShadows(camera, sunDirNorm);
+      _scratch_sunDir.copy(sun.getPosition()).normalize();
+      csm.renderShadows(camera, _scratch_sunDir);
 
       // 7. Update player spotlight uniforms if flashlight is on.
       if (spotlightOn) {
-        const camDir = new THREE.Vector3();
-        camera.getWorldDirection(camDir);
-
+        camera.getWorldDirection(_scratch_camDir);
         terrain.setSpotlightUniforms(
-          true, camera.position, camDir,
+          true, camera.position, _scratch_camDir,
           spotlightAngle, spotlightRange,
-          null, new THREE.Matrix4()
+          null, _scratch_identMat
         );
         rocks.setSpotlightUniforms(
-          true, camera.position, camDir,
+          true, camera.position, _scratch_camDir,
           spotlightAngle, spotlightRange,
-          null, new THREE.Matrix4()
+          null, _scratch_identMat
         );
       } else {
-        terrain.setSpotlightUniforms(false, camera.position, new THREE.Vector3(), 0, 0, null, new THREE.Matrix4());
-        rocks.setSpotlightUniforms(false, camera.position, new THREE.Vector3(), 0, 0, null, new THREE.Matrix4());
+        terrain.setSpotlightUniforms(false, camera.position, _scratch_zeroVec, 0, 0, null, _scratch_identMat);
+        rocks.setSpotlightUniforms(false, camera.position, _scratch_zeroVec, 0, 0, null, _scratch_identMat);
       }
     },
   });
@@ -417,7 +430,9 @@ async function boot() {
   sceneManager.register({
     update(_dt) {
       const camRenderPos = mode === 'player' ? player.getPosition() : camera.position;
-      const moonLocalCam = moonGroup.worldToLocal(camRenderPos.clone());
+      _scratch_moonCam.copy(camRenderPos);
+      moonGroup.worldToLocal(_scratch_moonCam);
+      const moonLocalCam = _scratch_moonCam;
       terrain.update(moonLocalCam);
       rocks.update(moonLocalCam);
     },
@@ -441,7 +456,10 @@ async function boot() {
         // the impact speed because constrainToSurface() has already zeroed
         // it by the time this update runs.
         if (!_wasOnSurface && grounded && _prevVertVel < -0.5) {
-          dust.spawnLand(player.body.position, player.body.surfaceNormal, -_prevVertVel);
+          // Spawn at ground/foot level (body.position is at eye height).
+          _scratch_dustPos.copy(player.body.position)
+            .addScaledVector(player.body.surfaceNormal, -EYE_HEIGHT + 0.1);
+          dust.spawnLand(_scratch_dustPos, player.body.surfaceNormal, -_prevVertVel);
         }
 
         // Footstep cadence — walking only, not while RCS is active.
@@ -449,7 +467,9 @@ async function boot() {
           _stepDist += vel.horizontal * dt;
           if (_stepDist >= STEP_INTERVAL) {
             _stepDist %= STEP_INTERVAL;
-            dust.spawnStep(player.body.position, player.body.surfaceNormal);
+            _scratch_dustPos.copy(player.body.position)
+              .addScaledVector(player.body.surfaceNormal, -EYE_HEIGHT + 0.1);
+            dust.spawnStep(_scratch_dustPos, player.body.surfaceNormal);
           }
         } else if (!grounded) {
           _stepDist = 0;
