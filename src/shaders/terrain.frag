@@ -182,7 +182,15 @@ void main() {
   vec3  sun  = normalize(uSunDirection);
   vec3  eDir = normalize(uEarthDirection);
 
-  float diff = max(dot(bN, sun), 0.0);
+  // Moon-body occlusion: zero out direct sunlight when the sun is below or
+  // at the horizon for this Moon surface location.  Without this, bump normals
+  // that tilt toward the sun can produce diff > 0 past the terminator, and the
+  // CSM shadow then darkens those fragments further — creating harsh dark halos
+  // at the terminator.  Matches the rock shader's moonOcclusion approach.
+  float moonNormSun  = max(dot(d, sun), 0.0);
+  float moonOcclusion = smoothstep(0.0, 0.10, moonNormSun);
+
+  float diff = max(dot(bN, sun), 0.0) * moonOcclusion;
 
   float shadow = sampleCSMShadow(vWorldPos, diff);
 

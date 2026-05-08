@@ -301,8 +301,9 @@ async function boot() {
   });
 
   // Show/hide the start screen based on pointer lock state.
+  // TEMP: only hide on lock, don't re-show on unlock (allows screenshots).
   input.on('lockChange', ({ locked }) => {
-    document.getElementById('start-screen')?.classList.toggle('hidden', locked);
+    if (locked) document.getElementById('start-screen')?.classList.add('hidden');
   });
 
   // 7. Sky + HUD.
