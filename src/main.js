@@ -39,6 +39,7 @@ import { PlayerSpotlightShadow } from './PlayerSpotlightShadow.js';
 import { SIM_TIME_SCALE, MOON_RADIUS } from './SimConfig.js';
 import { InputManager }           from './InputManager.js';
 import { TrajectoryPredictor }   from './TrajectoryPredictor.js';
+import { DustSystem }            from './DustSystem.js';
 
 // ---------------------------------------------------------------------------
 // Moon spin — tidal locking
@@ -81,8 +82,9 @@ const vpHoriz = () => document.getElementById('vp-horiz');
 const vpTotal = () => document.getElementById('vp-total');
 const vpRcs   = () => document.getElementById('vp-rcs');
 const vpDamp  = () => document.getElementById('vp-damp');
+const vpOrb   = () => document.getElementById('vp-orb');
 
-function updateVelPanel({ altitude, vertical, horizontal, total, rcs, rcsDamping, grounded }) {
+function updateVelPanel({ altitude, vertical, horizontal, total, rcs, rcsDamping, grounded, orbitalSpeed }) {
   vpAlt().textContent   = altitude.toFixed(1);
   vpVert().textContent  = (vertical  >= 0 ? '+' : '') + vertical.toFixed(2);
   vpVert().className    = 'vv ' + (vertical > 0.05 ? 'pos' : vertical < -0.05 ? 'neg' : '');
@@ -95,6 +97,16 @@ function updateVelPanel({ altitude, vertical, horizontal, total, rcs, rcsDamping
   if (dampEl) {
     dampEl.textContent = rcsDamping ? 'ON' : 'OFF';
     dampEl.className   = 'vv ' + (rcsDamping ? 'rcs-on' : 'rcs-off');
+  }
+  const orbEl = vpOrb();
+  if (orbEl && orbitalSpeed != null) {
+    const frac   = total / orbitalSpeed;
+    const filled = Math.round(Math.min(1, frac) * 10);
+    orbEl.textContent = '█'.repeat(filled) + '░'.repeat(10 - filled)
+                      + ' ' + Math.round(frac * 100) + '%';
+    orbEl.className   = 'vv '
+      + (frac >= 1.0 ? 'orb-esc' : frac >= 0.9 ? 'orb-high'
+       : frac >= 0.5 ? 'orb-mid' : 'orb-low');
   }
 }
 
@@ -216,10 +228,21 @@ async function boot() {
   const player  = new PlayerController(camera, terrain, MOON_RADIUS, moonGroup, input);
   const flyCtrl = new DebugFlyController(camera, input);
   const traj    = new TrajectoryPredictor(terrain, MOON_RADIUS, moonGroup);
+  const dust    = new DustSystem(MOON_RADIUS, moonGroup);
   let   mode    = 'player';
+
+  // Gravitational parameter in game units: GM = g_surface × R²
+  const GM_MOON = 1.62 * MOON_RADIUS * MOON_RADIUS;
 
   // Restore the player's last position and orientation from the previous session.
   player.restoreState();
+
+  // Dust trigger state — must initialise after restoreState() so _wasOnSurface
+  // matches the actual starting contact state (player might restore airborne).
+  let _wasOnSurface = player.body.onSurface;
+  let _prevVertVel  = 0;      // last frame's vertical velocity for impact detection
+  let _stepDist     = 0;      // accumulated horizontal distance since last puff
+  const STEP_INTERVAL = 1.5;  // game-units between footstep puffs
 
   if (DEBUG) {
     mode = 'fly';
@@ -406,15 +429,50 @@ async function boot() {
     },
   });
 
-  // 8e. Sky sphere follows camera.
+  // 8e. Dust particles — footstep puffs and landing bursts.
+  sceneManager.register({
+    update(dt) {
+      if (mode === 'player') {
+        const grounded = player.body.onSurface;
+        const vel      = player.getVelocityInfo();
+
+        // Landing detection: use the previous frame's vertical velocity as
+        // the impact speed because constrainToSurface() has already zeroed
+        // it by the time this update runs.
+        if (!_wasOnSurface && grounded && _prevVertVel < -0.5) {
+          dust.spawnLand(player.body.position, player.body.surfaceNormal, -_prevVertVel);
+        }
+
+        // Footstep cadence — walking only, not while RCS is active.
+        if (grounded && !player.rcsEnabled && vel.horizontal > 0.3) {
+          _stepDist += vel.horizontal * dt;
+          if (_stepDist >= STEP_INTERVAL) {
+            _stepDist %= STEP_INTERVAL;
+            dust.spawnStep(player.body.position, player.body.surfaceNormal);
+          }
+        } else if (!grounded) {
+          _stepDist = 0;
+        }
+
+        _prevVertVel  = vel.vertical;
+        _wasOnSurface = grounded;
+      }
+      dust.update(dt);
+    },
+  });
+
+  // 8f. Sky sphere follows camera.
   sceneManager.register({ update(dt) { starfield.update(dt); } });
 
-  // 8f. HUD.
+  // 8g. HUD.
   sceneManager.register({
     update() {
       if (mode === 'player') {
         ui.update();
-        updateVelPanel(player.getVelocityInfo());
+        const velInfo     = player.getVelocityInfo();
+        const r           = player.body.position.length();
+        velInfo.orbitalSpeed = Math.sqrt(GM_MOON / r);
+        updateVelPanel(velInfo);
       } else {
         updateFlyHud(flyCtrl, camWorldX, camWorldY, camWorldZ, worldSim);
         // Show fly camera's distance-from-Moon as altitude in the vel panel
@@ -447,6 +505,7 @@ async function boot() {
     player.dispose();
     flyCtrl.dispose();
     traj.dispose();
+    dust.dispose();
     terrain.dispose();
     rocks.dispose();
     sun.dispose();
