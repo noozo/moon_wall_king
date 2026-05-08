@@ -12,6 +12,7 @@
  */
 
 import * as THREE from 'three';
+import { CAM_NEAR, CAM_FAR } from './SimConfig.js';
 import { EffectComposer }  from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass }      from 'three/addons/postprocessing/RenderPass.js';
 import { ShaderPass }      from 'three/addons/postprocessing/ShaderPass.js';
@@ -101,8 +102,8 @@ export class SceneManager {
     this.camera = new THREE.PerspectiveCamera(
       75,
       window.innerWidth / window.innerHeight,
-      0.5,
-      350000
+      CAM_NEAR,
+      CAM_FAR
     );
   }
 

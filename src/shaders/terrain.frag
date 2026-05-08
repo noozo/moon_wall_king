@@ -48,79 +48,8 @@ uniform float     uSpotlightRange;
 uniform sampler2D uSpotlightShadowMap;
 uniform mat4      uSpotlightMatrix;
 
-// 16-tap Poisson disk (used by both CSM and spotlight shadows)
-const vec2 POISSON_DISK[16] = vec2[16](
-  vec2(-0.94201624, -0.39906216),
-  vec2( 0.94558609, -0.76890725),
-  vec2(-0.09418410, -0.92938870),
-  vec2( 0.34495938,  0.29387760),
-  vec2(-0.91588581,  0.45771432),
-  vec2(-0.81544232, -0.87912464),
-  vec2(-0.38277543,  0.27676845),
-  vec2( 0.97484398,  0.75648379),
-  vec2( 0.44323325, -0.97511554),
-  vec2( 0.53742981, -0.47373420),
-  vec2(-0.26496911, -0.41893023),
-  vec2( 0.79197514,  0.19090188),
-  vec2(-0.24188840,  0.99706507),
-  vec2(-0.81409955,  0.91437590),
-  vec2( 0.19984126,  0.78641367),
-  vec2( 0.14383161, -0.14100790)
-);
-
-// ---------------------------------------------------------------------------
-// Hash (fast, uniform-ish distribution over [0,1))
-// ---------------------------------------------------------------------------
-
-float hash(vec2 p) {
-  p  = fract(p * vec2(443.897, 441.423));
-  p += dot(p, p.yx + 19.19);
-  return fract((p.x + p.y) * p.x);
-}
-
-// ---------------------------------------------------------------------------
-// Analytical-gradient value noise
-// Returns vec3(dv/dp.x, dv/dp.y, value)
-// ---------------------------------------------------------------------------
-
-vec3 noiseGV(vec2 p) {
-  vec2 i = floor(p);
-  vec2 f = fract(p);
-
-  float a = hash(i);
-  float b = hash(i + vec2(1.0, 0.0));
-  float c = hash(i + vec2(0.0, 1.0));
-  float d = hash(i + vec2(1.0, 1.0));
-
-  vec2 u  = f * f * (3.0 - 2.0 * f);
-  vec2 du = 6.0 * f * (1.0 - f);
-
-  float val = mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-  float gx  = du.x * ((b - a) * (1.0 - u.y) + (d - c) * u.y);
-  float gy  = du.y * ((c - a) * (1.0 - u.x) + (d - b) * u.x);
-
-  return vec3(gx, gy, val);
-}
-
-// ---------------------------------------------------------------------------
-// FBM with accumulated analytical gradient
-// 30° rotation per octave breaks axis alignment, suppresses grid artefacts.
-// Returns vec3(gradX, gradY, value)
-// ---------------------------------------------------------------------------
-
-const mat2 FBM_ROT = mat2(0.86602540378, 0.5, -0.5, 0.86602540378);
-
-vec3 fbmGV4(vec2 p) {
-  float val  = 0.0;
-  vec2  grad = vec2(0.0);
-  float amp  = 0.5;
-  vec3  n;
-  n = noiseGV(p); val += amp * n.z; grad += amp * n.xy; p = FBM_ROT * p * 2.17; amp *= 0.5;
-  n = noiseGV(p); val += amp * n.z; grad += amp * n.xy; p = FBM_ROT * p * 2.17; amp *= 0.5;
-  n = noiseGV(p); val += amp * n.z; grad += amp * n.xy; p = FBM_ROT * p * 2.17; amp *= 0.5;
-  n = noiseGV(p); val += amp * n.z; grad += amp * n.xy;
-  return vec3(grad, val);
-}
+// @include noise
+// @include csm
 
 // ---------------------------------------------------------------------------
 // Triplanar detail-texture sampler (greyscale modulation map)
@@ -248,13 +177,6 @@ void main() {
 
   // ---------------------------------------------------------------------------
   // Lighting — Lambertian diffuse + earthshine ambient
-  //
-  // Earthshine: Earth reflects ~37% of sunlight back onto the Moon night side.
-  // Apparent earthshine illuminance ≈ 1.5% of direct sunlight, with a faint
-  // blue tint (Earth's blue-ocean/white-cloud albedo).
-  //
-  // A small constant ambient (0.02) accounts for interplanetary scatter
-  // and keeps deep-shadow surfaces from clipping to pure black.
   // ---------------------------------------------------------------------------
 
   vec3  sun  = normalize(uSunDirection);
@@ -262,65 +184,7 @@ void main() {
 
   float diff = max(dot(bN, sun), 0.0);
 
-  // ── Cascaded Shadow Maps ───────────────────────────────────────────────────
-  // 1. Linearise gl_FragCoord.z to view-space depth (world units from camera).
-  // 2. Select cascade based on that depth.
-  // 3. Transform fragment world position into shadow UV space using the
-  //    cascade's precomputed bias matrix.
-  // 4. 16-tap Poisson-disk PCF, disk rotated randomly per fragment to break
-  //    the fixed-pattern banding that would otherwise tile across the terrain.
-  // ──────────────────────────────────────────────────────────────────────────
-  float z_ndc     = gl_FragCoord.z * 2.0 - 1.0;
-  float viewDepth = (2.0 * uCamNear * uCamFar)
-                  / (uCamFar + uCamNear - z_ndc * (uCamFar - uCamNear));
-
-  // Select cascade and shadow matrix
-  mat4 shadowMatrix;
-  int  cascade;
-  if (viewDepth < uCascadeSplits.x) {
-    cascade      = 0;
-    shadowMatrix = uShadowMatrix0;
-  } else if (viewDepth < uCascadeSplits.y) {
-    cascade      = 1;
-    shadowMatrix = uShadowMatrix1;
-  } else {
-    cascade      = 2;
-    shadowMatrix = uShadowMatrix2;
-  }
-
-  vec4 shadowUVW = shadowMatrix * vec4(vWorldPos, 1.0);
-  vec2 shadowUV  = shadowUVW.xy;
-
-  float shadow = 1.0;
-  if (shadowUV.x > 0.001 && shadowUV.x < 0.999 &&
-      shadowUV.y > 0.001 && shadowUV.y < 0.999) {
-
-    float currentDepth = shadowUVW.z;
-    float bias = max(0.0008 * (1.0 - diff), 0.0002);
-
-    // Per-fragment random rotation — breaks repeating banding pattern
-    float phi    = fract(sin(dot(shadowUV, vec2(127.1, 311.7))) * 43758.5453) * 6.28318;
-    float cosPhi = cos(phi);
-    float sinPhi = sin(phi);
-    float spread = 5.0 / 1024.0;
-
-    float sum = 0.0;
-    for (int i = 0; i < 16; i++) {
-      vec2 rotated  = vec2(
-        POISSON_DISK[i].x * cosPhi - POISSON_DISK[i].y * sinPhi,
-        POISSON_DISK[i].x * sinPhi + POISSON_DISK[i].y * cosPhi
-      );
-      vec2 sampleUV = clamp(shadowUV + rotated * spread, 0.001, 0.999);
-
-      float d;
-      if      (cascade == 0) d = texture2D(uShadowMap0, sampleUV).r;
-      else if (cascade == 1) d = texture2D(uShadowMap1, sampleUV).r;
-      else                   d = texture2D(uShadowMap2, sampleUV).r;
-
-      sum += (currentDepth - bias > d) ? 0.0 : 1.0;
-    }
-    shadow = mix(0.15, 1.0, sum / 16.0);
-  }
+  float shadow = sampleCSMShadow(vWorldPos, diff);
 
   float earthFace  = max(dot(bN, eDir), 0.0);
 

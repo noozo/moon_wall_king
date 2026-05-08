@@ -27,8 +27,15 @@
 
 import * as THREE from 'three';
 import terrainVert from './shaders/terrain.vert?raw';
-import terrainFrag from './shaders/terrain.frag?raw';
+import _terrainFrag from './shaders/terrain.frag?raw';
+import noiseSrc from './shaders/lib/noise.glsl?raw';
+import csmSrc   from './shaders/lib/csm.glsl?raw';
 import { sunDirection, earthDirection } from './SunDirection.js';
+import { CAM_NEAR, CAM_FAR, CASCADE_SPLITS } from './SimConfig.js';
+
+const terrainFrag = _terrainFrag
+  .replace('// @include noise', noiseSrc)
+  .replace('// @include csm',   csmSrc);
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -252,9 +259,9 @@ export class TerrainSystem {
         uShadowMatrix2:  { value: new THREE.Matrix4() },
         // Cascade end distances (x=cascade0, y=cascade1, z=cascade2) and
         // camera near/far for gl_FragCoord.z linearisation.
-        uCascadeSplits:  { value: new THREE.Vector3(10, 40, 120) },
-        uCamNear:        { value: 0.5 },
-        uCamFar:         { value: 350000.0 },
+        uCascadeSplits:  { value: new THREE.Vector3(...CASCADE_SPLITS) },
+        uCamNear:        { value: CAM_NEAR },
+        uCamFar:         { value: CAM_FAR },
         uWireframe:      { value: 0 },
         // Player spotlight
         uSpotlightOn:    { value: 0 },

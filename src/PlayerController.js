@@ -69,15 +69,6 @@ const GROUND_RESPONSE = 12;
 const RCS_ACCEL_LATERAL = 2.0;
 const RCS_ACCEL_VERTICAL = 3.5;  // Stronger lift thrust for reliable launch/descent
 
-/**
- * Translational rate damping — GNC auto-fires thrusters opposite to the
- * body's current velocity when no thrust keys are held, nulling drift.
- * Uses the same RCS_ACCEL budget so damping feels identical to manual thrust.
- * Toggled independently from RCS via T key.  Real-world equivalent:
- * Dragon's "station-keeping" hold mode / KSP translational SAS.
- */
-const RCS_DAMPING_KEY = 'KeyT';
-
 /** Exponential smoothing rate for camera radial height (units/s). Higher = tighter. */
 const CAM_HEIGHT_SMOOTH = 20;
 
@@ -133,12 +124,14 @@ export class PlayerController {
    * @param {object}                   terrainSystem  getHeightAt(nx,ny,nz)→number
    * @param {number}                   moonRadius
    * @param {THREE.Group|null}         moonGroup      For world-space camera placement
+   * @param {import('./InputManager').InputManager} input
    */
-  constructor(camera, terrainSystem, moonRadius = 1000, moonGroup = null) {
+  constructor(camera, terrainSystem, moonRadius = 1000, moonGroup = null, input) {
     this.camera        = camera;
     this.terrainSystem = terrainSystem;
     this.moonRadius    = moonRadius;
     this._moonGroup    = moonGroup;
+    this._input        = input;
 
     // Movement parameters
     this.playerHeight     = 1.8;
@@ -172,21 +165,9 @@ export class PlayerController {
     /** RCS toggle — press R to enable, R again to disable. */
     this.rcsEnabled = false;
 
-    /**
-     * Translational rate damping toggle — press T to enable/disable.
-     * When on, GNC auto-fires thrusters to null velocity whenever no thrust
-     * keys are held.  Only active while rcsEnabled is also true.
-     */
+    /** Translational rate damping — T key toggle. */
     this.rcsDampingEnabled = false;
 
-    // Input state
-    this.keys = {
-      w: false, a: false, s: false, d: false,
-      shift: false,
-      space: false,  // Space held state — used for RCS up-thrust in space
-      ctrl:  false,  // Ctrl held state  — RCS down-thrust
-    };
-    this.isLocked  = false;
     this.currentSpeed = 0;
 
     /**
@@ -196,7 +177,19 @@ export class PlayerController {
      */
     this._earthRenderPos = new THREE.Vector3(0, 25000, 0);
 
-    this._setupInputListeners();
+    // Subscribe to one-shot input events.
+    this._onJumpEvent     = () => { if (!this.rcsEnabled && !this._jumpQueued) this._jumpQueued = true; };
+    this._onJumpRelease   = () => { if (!this.body.onSurface && !this.rcsEnabled) this._jumpQueued = false; };
+    this._onToggleRCS     = () => { this.rcsEnabled = !this.rcsEnabled; this._jumpQueued = false; };
+    this._onToggleDamping = () => { this.rcsDampingEnabled = !this.rcsDampingEnabled; };
+    this._onLockChange    = ({ locked }) => { if (!locked) this._jumpQueued = false; };
+
+    input.on('jump',          this._onJumpEvent);
+    input.on('jumpRelease',   this._onJumpRelease);
+    input.on('toggleRCS',     this._onToggleRCS);
+    input.on('toggleDamping', this._onToggleDamping);
+    input.on('lockChange',    this._onLockChange);
+
     this._updateCameraTransform();
   }
 
@@ -206,6 +199,7 @@ export class PlayerController {
 
   /** Call every frame with real delta-time in seconds. */
   update(dt) {
+    this._applyMouseLook();
     this._applyJumpImpulse();
     this._integrateForces(dt);
     this.body.constrainToSurface(this.terrainSystem);
@@ -328,48 +322,36 @@ export class PlayerController {
 
     if (this.rcsEnabled) {
       // ── 2a. RCS — continuous camera-relative thrust ───────────────────────
-      // Keys apply a constant force while held; velocity accumulates freely.
-      // When no thrust keys are held and damping is on, GNC auto-fires opposite
-      // to current velocity (translational rate damping / velocity kill).
-      if (this.isLocked) {
+      if (this._input.isLocked) {
         _qInv.copy(mgq).invert();
         _rcsFwd  .set(0,  0, -1).applyQuaternion(this.camera.quaternion).applyQuaternion(_qInv);
         _rcsRight.set(1,  0,  0).applyQuaternion(this.camera.quaternion).applyQuaternion(_qInv);
 
-        const fb = Number(this.keys.w)     - Number(this.keys.s);
-        const lr = Number(this.keys.d)     - Number(this.keys.a);
-        const ud = Number(this.keys.space) - Number(this.keys.ctrl);
+        const fb = Number(this._input.isDown('forward')) - Number(this._input.isDown('back'));
+        const lr = Number(this._input.isDown('right'))   - Number(this._input.isDown('left'));
+        const ud = Number(this._input.isDown('up'))      - Number(this._input.isDown('down'));
         const anyThrustKey = fb !== 0 || lr !== 0 || ud !== 0;
 
         if (fb !== 0) _accel.addScaledVector(_rcsFwd,               fb * RCS_ACCEL_LATERAL);
         if (lr !== 0) _accel.addScaledVector(_rcsRight,              lr * RCS_ACCEL_LATERAL);
-        // Space/Ctrl thrust along surface normal — reliable lift-off and descent
-        // regardless of camera pitch.  Stronger vertical thrust for better launch.
         if (ud !== 0) _accel.addScaledVector(this.body.surfaceNormal, ud * RCS_ACCEL_VERTICAL);
 
         // ── 2a-ii. Translational rate damping (GNC velocity kill) ─────────
-        // When T-damping is on and no thrust keys are held, auto-fire thrusters
-        // opposite to current velocity.  Capped at max lateral thrust so it never
-        // over-shoots zero (minimum of available thrust vs. what's needed to
-        // kill remaining speed in this frame).
         if (this.rcsDampingEnabled && !anyThrustKey && !this.body.onSurface) {
           const speed = this.body.velocity.length();
           if (speed > 0.001) {
-            // Max deceleration we can apply this frame without overshooting zero:
             const maxDamp = Math.min(RCS_ACCEL_LATERAL, speed / dt);
             _accel.addScaledVector(this.body.velocity, -maxDamp / speed);
           }
         }
       }
-    } else if (this.body.onSurface && this.isLocked) {
+    } else if (this.body.onSurface && this._input.isLocked) {
       // ── 2b. Ground response — leg-force WASD walking (RCS off only) ───────
-      // Proportional controller drives body toward the desired tangential
-      // velocity.  Acts as friction when no keys are pressed.
       this._buildTangentBasis(this.body.surfaceNormal);
 
-      const speed = this.keys.shift ? this.sprintSpeed : this.moveSpeed;
-      const fb    = Number(this.keys.w) - Number(this.keys.s);
-      const lr    = Number(this.keys.d) - Number(this.keys.a);
+      const speed = this._input.isDown('sprint') ? this.sprintSpeed : this.moveSpeed;
+      const fb    = Number(this._input.isDown('forward')) - Number(this._input.isDown('back'));
+      const lr    = Number(this._input.isDown('right'))   - Number(this._input.isDown('left'));
 
       _fwd.copy(_north).multiplyScalar(Math.cos(this.yaw))
           .addScaledVector(_east, Math.sin(this.yaw));
@@ -480,77 +462,19 @@ export class PlayerController {
   // Internal — input
   // ---------------------------------------------------------------------------
 
-  _setupInputListeners() {
-    document.addEventListener('keydown',           e => this._onKeyDown(e));
-    document.addEventListener('keyup',             e => this._onKeyUp(e));
-    document.addEventListener('mousemove',         e => this._onMouseMove(e));
-    document.addEventListener('pointerlockchange', () => this._onPointerLockChange());
-    document.addEventListener('click', () => {
-      if (!this.isLocked) document.body.requestPointerLock();
-    });
-  }
-
-  _onKeyDown(e) {
-    switch (e.code) {
-      case 'KeyW':     this.keys.w     = true;  break;
-      case 'KeyA':     this.keys.a     = true;  break;
-      case 'KeyS':     this.keys.s     = true;  break;
-      case 'KeyD':     this.keys.d     = true;  break;
-      case 'ShiftLeft': case 'ShiftRight': this.keys.shift = true; break;
-      case 'ControlLeft': case 'ControlRight':
-        this.keys.ctrl = true;
-        e.preventDefault();
-        break;
-      case 'KeyR':
-        this.rcsEnabled = !this.rcsEnabled;
-        this._jumpQueued = false;
-        break;
-      case RCS_DAMPING_KEY:
-        this.rcsDampingEnabled = !this.rcsDampingEnabled;
-        break;
-      case 'Space':
-        this.keys.space = true;
-        if (!this.rcsEnabled && !this._jumpQueued) this._jumpQueued = true;
-        e.preventDefault();
-        break;
-    }
-  }
-
-  _onKeyUp(e) {
-    switch (e.code) {
-      case 'KeyW':     this.keys.w     = false; break;
-      case 'KeyA':     this.keys.a     = false; break;
-      case 'KeyS':     this.keys.s     = false; break;
-      case 'KeyD':     this.keys.d     = false; break;
-      case 'ShiftLeft': case 'ShiftRight': this.keys.shift = false; break;
-      case 'ControlLeft': case 'ControlRight': this.keys.ctrl = false; break;
-      case 'Space':
-        this.keys.space = false;
-        if (!this.body.onSurface && !this.rcsEnabled) this._jumpQueued = false;
-        break;
-    }
-  }
-
-  _onMouseMove(e) {
-    if (!this.isLocked) return;
-    this.yaw   += e.movementX * this.mouseSensitivity;
-    this.pitch -= e.movementY * this.mouseSensitivity;
+  _applyMouseLook() {
+    if (!this._input.isLocked) return;
+    const { x: dx, y: dy } = this._input.consumeMouseDelta();
+    this.yaw   += dx * this.mouseSensitivity;
+    this.pitch -= dy * this.mouseSensitivity;
     this.pitch  = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, this.pitch));
   }
 
-  _onPointerLockChange() {
-    const wasLocked = this.isLocked;
-    this.isLocked = document.pointerLockElement === document.body;
-
-    // Clear all key state whenever pointer-lock changes.  If the browser
-    // swallows a keyup while lock was being released/acquired, keys can get
-    // stuck permanently.  Resetting here is the standard fix.
-    if (wasLocked !== this.isLocked) {
-      for (const k of Object.keys(this.keys)) this.keys[k] = false;
-      this._jumpQueued = false;
-    }
-
-    const startScreen = document.getElementById('start-screen');
-    if (startScreen) startScreen.classList.toggle('hidden', this.isLocked);
+  dispose() {
+    this._input.off('jump',          this._onJumpEvent);
+    this._input.off('jumpRelease',   this._onJumpRelease);
+    this._input.off('toggleRCS',     this._onToggleRCS);
+    this._input.off('toggleDamping', this._onToggleDamping);
+    this._input.off('lockChange',    this._onLockChange);
   }
 }

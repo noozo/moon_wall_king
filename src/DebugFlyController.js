@@ -45,29 +45,18 @@ const _up  = new THREE.Vector3();
 // ---------------------------------------------------------------------------
 
 export class DebugFlyController {
-  /** @param {THREE.PerspectiveCamera} camera */
-  constructor(camera) {
+  /**
+   * @param {THREE.PerspectiveCamera} camera
+   * @param {import('./InputManager').InputManager} input
+   */
+  constructor(camera, input) {
     this.camera   = camera;
+    this._input   = input;
     this.isActive = false;
 
-    // World-space position.
-    this._pos = new THREE.Vector3();
-
-    // Orientation stored as quaternion.  All rotations are post-multiplied
-    // (camera-local frame) so they never couple with each other.
-    this._rot = new THREE.Quaternion();
-
-    this._speed    = 100;
-    this._isLocked = false;
-
-    this._keys = {
-      w: false, s: false, a: false, d: false,
-      up: false, down: false,
-      rollLeft: false, rollRight: false,
-      shift: false,
-    };
-
-    this._setupListeners();
+    this._pos   = new THREE.Vector3();
+    this._rot   = new THREE.Quaternion();
+    this._speed = 100;
   }
 
   // ---------------------------------------------------------------------------
@@ -88,38 +77,51 @@ export class DebugFlyController {
 
   deactivate() {
     this.isActive = false;
+    // InputManager resets held state on pointer-lock changes; nothing to clear here.
+  }
+
+  dispose() {
+    // No InputManager subscriptions to remove.
   }
 
   /** @param {number} dt  Seconds since last frame */
   update(dt) {
-    if (!this.isActive || !this._isLocked) return;
+    if (!this.isActive || !this._input.isLocked) return;
 
-    const speed = this._speed * (this._keys.shift ? SHIFT_MULT : 1);
+    const speed = this._speed * (this._input.isDown('sprint') ? SHIFT_MULT : 1);
 
-    // Build camera-local direction vectors from current orientation.
     _fwd.set(0,  0, -1).applyQuaternion(this._rot);
     _rgt.set(1,  0,  0).applyQuaternion(this._rot);
     _up .set(0,  1,  0).applyQuaternion(this._rot);
 
-    if (this._keys.w)    this._pos.addScaledVector(_fwd,   speed * dt);
-    if (this._keys.s)    this._pos.addScaledVector(_fwd,  -speed * dt);
-    if (this._keys.d)    this._pos.addScaledVector(_rgt,   speed * dt);
-    if (this._keys.a)    this._pos.addScaledVector(_rgt,  -speed * dt);
-    if (this._keys.up)   this._pos.addScaledVector(_up,    speed * dt);
-    if (this._keys.down) this._pos.addScaledVector(_up,   -speed * dt);
+    if (this._input.isDown('forward'))  this._pos.addScaledVector(_fwd,   speed * dt);
+    if (this._input.isDown('back'))     this._pos.addScaledVector(_fwd,  -speed * dt);
+    if (this._input.isDown('right'))    this._pos.addScaledVector(_rgt,   speed * dt);
+    if (this._input.isDown('left'))     this._pos.addScaledVector(_rgt,  -speed * dt);
+    if (this._input.isDown('up'))       this._pos.addScaledVector(_up,    speed * dt);
+    if (this._input.isDown('down'))     this._pos.addScaledVector(_up,   -speed * dt);
 
-    // Roll — post-multiply keeps it in local frame.
-    // +LOCAL_Z = camera backward; positive angle rotates counter-clockwise
-    // when looking along +Z (i.e. toward you) = clockwise when looking forward
-    // = right-roll.  So Q (rollLeft) needs negative angle, E needs positive.
-    // Previous code had the signs swapped → inverted roll.
-    if (this._keys.rollLeft)  {
+    // Roll — post-multiply keeps it in camera-local frame.
+    if (this._input.isDown('rollLeft'))  {
       _dq.setFromAxisAngle(LOCAL_Z,  ROLL_SPEED * dt);
       this._rot.multiply(_dq);
     }
-    if (this._keys.rollRight) {
+    if (this._input.isDown('rollRight')) {
       _dq.setFromAxisAngle(LOCAL_Z, -ROLL_SPEED * dt);
       this._rot.multiply(_dq);
+    }
+
+    // Mouse look — consume accumulated delta from InputManager.
+    const { x: dx, y: dy } = this._input.consumeMouseDelta();
+    if (dx !== 0) { _dq.setFromAxisAngle(LOCAL_Y, -dx * MOUSE_SENS); this._rot.multiply(_dq); }
+    if (dy !== 0) { _dq.setFromAxisAngle(LOCAL_X, -dy * MOUSE_SENS); this._rot.multiply(_dq); }
+
+    // Scroll — halve or double speed.
+    const scroll = this._input.consumeScrollDelta();
+    if (scroll !== 0) {
+      this._speed = Math.max(SPEED_MIN, Math.min(SPEED_MAX,
+        this._speed * (scroll > 0 ? 0.5 : 2.0)
+      ));
     }
 
     this._apply();
@@ -146,86 +148,5 @@ export class DebugFlyController {
   _apply() {
     this.camera.position.copy(this._pos);
     this.camera.quaternion.copy(this._rot);
-  }
-
-  _setupListeners() {
-    document.addEventListener('keydown', e => this._onKeyDown(e));
-    document.addEventListener('keyup',   e => this._onKeyUp(e));
-    document.addEventListener('mousemove', e => this._onMouseMove(e));
-    document.addEventListener('pointerlockchange', () => {
-      this._isLocked = document.pointerLockElement === document.body;
-    });
-    document.addEventListener('wheel', e => this._onWheel(e), { passive: true });
-    document.addEventListener('click', () => {
-      if (this.isActive && !this._isLocked) document.body.requestPointerLock();
-    });
-  }
-
-  _onMouseMove(e) {
-    if (!this.isActive || !this._isLocked) return;
-
-    // Yaw: rotate around camera's LOCAL Y.
-    // Post-multiply = applied in camera-local frame, so this is always the
-    // camera's own up axis — never bleeds into roll regardless of camera tilt.
-    if (e.movementX !== 0) {
-      _dq.setFromAxisAngle(LOCAL_Y, -e.movementX * MOUSE_SENS);
-      this._rot.multiply(_dq);
-    }
-
-    // Pitch: rotate around camera's LOCAL X.
-    if (e.movementY !== 0) {
-      _dq.setFromAxisAngle(LOCAL_X, -e.movementY * MOUSE_SENS);
-      this._rot.multiply(_dq);
-    }
-
-    this._apply();
-  }
-
-  _onKeyDown(e) {
-    if (!this.isActive) return;
-    switch (e.code) {
-      case 'KeyW': this._keys.w         = true; break;
-      case 'KeyS': this._keys.s         = true; break;
-      case 'KeyA': this._keys.a         = true; break;
-      case 'KeyD': this._keys.d         = true; break;
-      case 'KeyQ': this._keys.rollLeft  = true; break;
-      case 'KeyE': this._keys.rollRight = true; break;
-      case 'Space':
-        this._keys.up = true;
-        e.preventDefault();
-        break;
-      case 'ControlLeft': case 'ControlRight':
-        this._keys.down = true;
-        e.preventDefault();
-        break;
-      case 'ShiftLeft': case 'ShiftRight':
-        this._keys.shift = true;
-        break;
-    }
-  }
-
-  _onKeyUp(e) {
-    if (!this.isActive) return;
-    switch (e.code) {
-      case 'KeyW': this._keys.w         = false; break;
-      case 'KeyS': this._keys.s         = false; break;
-      case 'KeyA': this._keys.a         = false; break;
-      case 'KeyD': this._keys.d         = false; break;
-      case 'KeyQ': this._keys.rollLeft  = false; break;
-      case 'KeyE': this._keys.rollRight = false; break;
-      case 'Space':
-        this._keys.up   = false; break;
-      case 'ControlLeft': case 'ControlRight':
-        this._keys.down = false; break;
-      case 'ShiftLeft': case 'ShiftRight':
-        this._keys.shift = false; break;
-    }
-  }
-
-  _onWheel(e) {
-    if (!this.isActive) return;
-    this._speed = Math.max(SPEED_MIN, Math.min(SPEED_MAX,
-      this._speed * (e.deltaY > 0 ? 0.5 : 2.0)
-    ));
   }
 }

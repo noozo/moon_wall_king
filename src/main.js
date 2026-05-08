@@ -36,9 +36,9 @@ import { updateSunDirection, updateEarthDirection } from './SunDirection.js';
 import { WorldSimulator }     from './WorldSimulator.js';
 import { CascadedShadowMap } from './CascadedShadowMap.js';
 import { PlayerSpotlightShadow } from './PlayerSpotlightShadow.js';
-import { SIM_TIME_SCALE }     from './SimConfig.js';
-
-const MOON_RADIUS = 1000;
+import { SIM_TIME_SCALE, MOON_RADIUS } from './SimConfig.js';
+import { InputManager }           from './InputManager.js';
+import { TrajectoryPredictor }   from './TrajectoryPredictor.js';
 
 // ---------------------------------------------------------------------------
 // Moon spin — tidal locking
@@ -211,9 +211,11 @@ async function boot() {
     flyCtrl.resetPosition(new THREE.Vector3(0, 0, 0));
   }
 
-  // 6. Controllers.
-  const player  = new PlayerController(camera, terrain, MOON_RADIUS, moonGroup);
-  const flyCtrl = new DebugFlyController(camera);
+  // 6. Input + controllers.
+  const input   = new InputManager();
+  const player  = new PlayerController(camera, terrain, MOON_RADIUS, moonGroup, input);
+  const flyCtrl = new DebugFlyController(camera, input);
+  const traj    = new TrajectoryPredictor(terrain, MOON_RADIUS, moonGroup);
   let   mode    = 'player';
 
   if (DEBUG) {
@@ -225,49 +227,37 @@ async function boot() {
     document.getElementById('start-screen')?.classList.add('hidden');
   }
 
-  // X key — toggle wireframe on terrain + rocks for LOD inspection.
-  // L key — toggle player flashlight
+  // Global input subscriptions — all key handling via InputManager.
   let wireframe = false;
-  document.addEventListener('keydown', e => {
-    if (e.code === 'KeyX') {
-      wireframe = !wireframe;
-      terrain.setWireframe(wireframe);
-      rocks.setWireframe(wireframe);
-      return;
-    }
-    if (e.code === 'KeyL') {
-      spotlightOn = !spotlightOn;
-      console.log(`Flashlight: ${spotlightOn ? 'ON' : 'OFF'}`);
-      return;
-    }
-    // Spotlight config: [ / ] for range, - / = for angle
-    if (spotlightOn) {
-      if (e.code === 'BracketRight') {   // ] increase range
-        spotlightRange = Math.min(100, spotlightRange + 5);
-        console.log(`Flashlight range: ${spotlightRange.toFixed(1)}`);
-        return;
-      }
-      if (e.code === 'BracketLeft') {    // [ decrease range
-        spotlightRange = Math.max(5, spotlightRange - 5);
-        console.log(`Flashlight range: ${spotlightRange.toFixed(1)}`);
-        return;
-      }
-      if (e.code === 'Equal') {           // = increase angle
-        spotlightAngle = Math.min(1.5, spotlightAngle + 0.1);
-        console.log(`Flashlight angle: ${(spotlightAngle * 180 / Math.PI).toFixed(1)}°`);
-        return;
-      }
-      if (e.code === 'Minus') {           // - decrease angle
-        spotlightAngle = Math.max(0.1, spotlightAngle - 0.1);
-        console.log(`Flashlight angle: ${(spotlightAngle * 180 / Math.PI).toFixed(1)}°`);
-        return;
-      }
-    }
+
+  input.on('toggleWireframe', () => {
+    wireframe = !wireframe;
+    terrain.setWireframe(wireframe);
+    rocks.setWireframe(wireframe);
   });
 
-  document.addEventListener('keydown', e => {
-    if (e.code !== 'Tab') return;
-    e.preventDefault();
+  input.on('toggleFlashlight', () => {
+    spotlightOn = !spotlightOn;
+  });
+
+  input.on('flashlightRangeInc', () => {
+    if (spotlightOn) spotlightRange = Math.min(100, spotlightRange + 5);
+  });
+  input.on('flashlightRangeDec', () => {
+    if (spotlightOn) spotlightRange = Math.max(5, spotlightRange - 5);
+  });
+  input.on('flashlightAngleInc', () => {
+    if (spotlightOn) spotlightAngle = Math.min(1.5, spotlightAngle + 0.1);
+  });
+  input.on('flashlightAngleDec', () => {
+    if (spotlightOn) spotlightAngle = Math.max(0.1, spotlightAngle - 0.1);
+  });
+
+  input.on('toggleMode', () => {
+    // Discard any accumulated mouse delta so the new controller doesn't inherit
+    // movement from the previous mode's last frames.
+    input.consumeMouseDelta();
+
     if (mode === 'player') {
       mode = 'fly';
       flyCtrl.activate();
@@ -282,6 +272,11 @@ async function boot() {
       worldSim.floatingOrigin.y = worldSim.moonWorldPos.y;
       worldSim.floatingOrigin.z = worldSim.moonWorldPos.z;
     }
+  });
+
+  // Show/hide the start screen based on pointer lock state.
+  input.on('lockChange', ({ locked }) => {
+    document.getElementById('start-screen')?.classList.toggle('hidden', locked);
   });
 
   // 7. Sky + HUD.
@@ -401,10 +396,17 @@ async function boot() {
     },
   });
 
-  // 8d. Sky sphere follows camera.
+  // 8d. Trajectory predictor — ballistic arc when RCS is active.
+  sceneManager.register({
+    update() {
+      if (mode === 'player') traj.update(player);
+    },
+  });
+
+  // 8e. Sky sphere follows camera.
   sceneManager.register({ update(dt) { starfield.update(dt); } });
 
-  // 8e. HUD.
+  // 8f. HUD.
   sceneManager.register({
     update() {
       if (mode === 'player') {
@@ -437,6 +439,10 @@ async function boot() {
 
   window.addEventListener('beforeunload', () => {
     running = false;
+    input.dispose();
+    player.dispose();
+    flyCtrl.dispose();
+    traj.dispose();
     terrain.dispose();
     rocks.dispose();
     sun.dispose();

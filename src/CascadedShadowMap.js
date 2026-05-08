@@ -24,19 +24,15 @@
  */
 
 import * as THREE from 'three';
+import { CASCADE_SPLITS } from './SimConfig.js';
 
 // ── Configuration ────────────────────────────────────────────────────────────
 
 /** Number of shadow cascades.  Shader has 3 fixed samplers — keep in sync. */
 export const NUM_CASCADES = 3;
 
-/**
- * View-space distances (world units from camera) at which each cascade ends.
- * Cascade 0: [camera.near, SPLITS[0]]
- * Cascade 1: [SPLITS[0],   SPLITS[1]]
- * Cascade 2: [SPLITS[1],   SPLITS[2]]
- */
-export const CASCADE_SPLITS = [20, 200, 2000];
+// CASCADE_SPLITS imported from SimConfig — [20, 200, 2000]
+export { CASCADE_SPLITS };
 
 /** Shadow map resolution.  All cascades use the same size for simplicity. */
 const MAP_SIZE = 1024;
