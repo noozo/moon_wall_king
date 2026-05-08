@@ -187,7 +187,11 @@ void main() {
   // that tilt toward the sun can produce diff > 0 past the terminator, and the
   // CSM shadow then darkens those fragments further — creating harsh dark halos
   // at the terminator.  Matches the rock shader's moonOcclusion approach.
-  float moonNormSun  = max(dot(d, sun), 0.0);
+  //
+  // Use vWorldPos (world-space, post-moonGroup rotation) not vLocalPos (Moon-
+  // local, pre-rotation) — they diverge once the Moon starts spinning, causing
+  // the dayside to go dark after the Moon has rotated.
+  float moonNormSun  = max(dot(normalize(vWorldPos), sun), 0.0);
   float moonOcclusion = smoothstep(0.0, 0.10, moonNormSun);
 
   float diff = max(dot(bN, sun), 0.0) * moonOcclusion;
