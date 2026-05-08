@@ -37,6 +37,10 @@ const terrainFrag = _terrainFrag
   .replace('// @include noise', noiseSrc)
   .replace('// @include csm',   csmSrc);
 
+// Module-level ref used by the Vite HMR handler below to update the live
+// material without re-creating the whole system.
+let _liveTerrainSystem = null;
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -225,6 +229,13 @@ export class TerrainSystem {
     this._moonData  = moonData;
     this._moonGroup = moonGroup;
 
+    // Elevation data is static (loaded from TIFF, never changes at runtime), so
+    // results can be cached indefinitely.  Keyed on a quantised integer derived
+    // from the normalised sphere direction — each bin ≈ 2 m on a 1000-unit Moon.
+    this._heightCache = new Map();
+
+    _liveTerrainSystem = this;
+
     // Shared ShaderMaterial for ALL terrain quads.
     // Uses two texture LOD levels: 4K for far, 8K for close, plus a tileable
     // detail modulation map sampled triplanarly at walking range.
@@ -310,7 +321,16 @@ export class TerrainSystem {
    * Delegates to MoonData which does bilinear interpolation on the uint16 TIFF.
    */
   getHeightAt(nx, ny, nz) {
-    return this._moonData.getElevationAt(nx, ny, nz);
+    // Quantise to ~2 m bins: each component maps [-1,1] → [0,999].
+    const key = ((nx + 1) * 500 | 0) * 1_000_000
+              + ((ny + 1) * 500 | 0) * 1_000
+              + ((nz + 1) * 500 | 0);
+    let h = this._heightCache.get(key);
+    if (h === undefined) {
+      h = this._moonData.getElevationAt(nx, ny, nz);
+      this._heightCache.set(key, h);
+    }
+    return h;
   }
 
   /**
@@ -754,4 +774,28 @@ export class TerrainSystem {
     // Terrain self-shadowing is already handled by NdotL + bump normals.
     node.built = true;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Vite HMR — live shader reload without a full page refresh
+// ---------------------------------------------------------------------------
+// When any of the imported .glsl files change, rebuild the fragment shader
+// string and push it to the live material.  The TerrainSystem instance itself
+// stays alive; only its fragmentShader is replaced.
+if (import.meta.hot) {
+  import.meta.hot.accept(
+    [
+      './shaders/terrain.frag?raw',
+      './shaders/lib/noise.glsl?raw',
+      './shaders/lib/csm.glsl?raw',
+    ],
+    ([newFrag, newNoise, newCsm]) => {
+      if (!_liveTerrainSystem) return;
+      const src = (newFrag  ?? _terrainFrag)
+        .replace('// @include noise', newNoise ?? noiseSrc)
+        .replace('// @include csm',   newCsm   ?? csmSrc);
+      _liveTerrainSystem._material.fragmentShader = src;
+      _liveTerrainSystem._material.needsUpdate    = true;
+    },
+  );
 }

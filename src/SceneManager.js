@@ -63,8 +63,19 @@ export class SceneManager {
     this._subsystems.push(subsystem);
   }
 
+  /**
+   * Remove a subsystem by its `id` field.
+   * No-op if the id is not found.
+   * @param {string} id
+   */
+  unregister(id) {
+    this._subsystems = this._subsystems.filter(s => s.id !== id);
+  }
+
   tick() {
-    const dt = Math.min(this._clock.getDelta(), 0.1);
+    // Cap at 50 ms (20 fps lower bound) to prevent large physics steps after
+    // tab-blur or debugger pauses from launching the player into orbit.
+    const dt = Math.min(this._clock.getDelta(), 0.05);
 
     for (const s of this._subsystems) {
       s.update(dt);

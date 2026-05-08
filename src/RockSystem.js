@@ -36,6 +36,9 @@ import { CAM_NEAR, CAM_FAR, CASCADE_SPLITS } from './SimConfig.js';
 import noiseSrc from './shaders/lib/noise.glsl?raw';
 import csmSrc   from './shaders/lib/csm.glsl?raw';
 
+// Module-level ref used by the Vite HMR handler at the bottom of this file.
+let _liveRockSystem = null;
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -282,6 +285,7 @@ export class RockSystem {
     this._moonRadius = moonRadius;
     this._terrain    = terrainSystem;
     this._parent     = moonGroup ?? scene;  // fall back to scene if not provided
+    _liveRockSystem  = this;
 
     // Shared material.  FrontSide is correct: ConvexGeometry always produces
     // outward-pointing normals with no flipped triangles.
@@ -648,4 +652,31 @@ this._material = new THREE.ShaderMaterial({
     h ^= h >>> 16;
     return ((h >>> 0) & 0xFFFF) / 65536.0;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Vite HMR — live rock shader reload
+// ---------------------------------------------------------------------------
+// ROCK_FRAG embeds the lib sources via template literal — no markers remain
+// in the built string.  We track the currently-injected versions so that
+// multi-step edits (change noise twice) still find the right substring.
+let _hmrNoiseSrc = noiseSrc;
+let _hmrCsmSrc   = csmSrc;
+
+if (import.meta.hot) {
+  import.meta.hot.accept(
+    ['./shaders/lib/noise.glsl?raw', './shaders/lib/csm.glsl?raw'],
+    ([newNoise, newCsm]) => {
+      if (!_liveRockSystem) return;
+      const noise = newNoise ?? _hmrNoiseSrc;
+      const csm   = newCsm   ?? _hmrCsmSrc;
+      const mat = _liveRockSystem._material;
+      mat.fragmentShader = mat.fragmentShader
+        .replace(_hmrNoiseSrc, noise)
+        .replace(_hmrCsmSrc,   csm);
+      mat.needsUpdate = true;
+      _hmrNoiseSrc = noise;
+      _hmrCsmSrc   = csm;
+    },
+  );
 }

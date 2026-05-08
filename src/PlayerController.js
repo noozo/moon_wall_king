@@ -470,6 +470,69 @@ export class PlayerController {
     this.pitch  = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, this.pitch));
   }
 
+  /**
+   * Snapshot the current RCS thrust vector in Moon-local space.
+   * Fills `out` with the net thruster acceleration from held keys, or zero
+   * if RCS is off or the pointer isn't locked.  Mirrors `_integrateForces`
+   * but returns only the thrust component — gravity is excluded.
+   *
+   * Uses module-level scratch vectors: do not call during iteration over them.
+   *
+   * @param {THREE.Vector3} out  Receives the thrust acceleration in Moon-local space.
+   * @returns {THREE.Vector3} out (for chaining)
+   */
+  getThrustVector(out) {
+    out.set(0, 0, 0);
+    if (!this.rcsEnabled || !this._input.isLocked) return out;
+
+    const mgq = this._moonGroup ? this._moonGroup.quaternion : _IDENTITY_Q;
+    _qInv.copy(mgq).invert();
+    _rcsFwd  .set(0, 0, -1).applyQuaternion(this.camera.quaternion).applyQuaternion(_qInv);
+    _rcsRight.set(1, 0,  0).applyQuaternion(this.camera.quaternion).applyQuaternion(_qInv);
+
+    const fb = Number(this._input.isDown('forward')) - Number(this._input.isDown('back'));
+    const lr = Number(this._input.isDown('right'))   - Number(this._input.isDown('left'));
+    const ud = Number(this._input.isDown('up'))      - Number(this._input.isDown('down'));
+
+    if (fb !== 0) out.addScaledVector(_rcsFwd,               fb * RCS_ACCEL_LATERAL);
+    if (lr !== 0) out.addScaledVector(_rcsRight,              lr * RCS_ACCEL_LATERAL);
+    if (ud !== 0) out.addScaledVector(this.body.surfaceNormal, ud * RCS_ACCEL_VERTICAL);
+
+    return out;
+  }
+
+  /** Persist position, velocity, and orientation to localStorage. */
+  saveState() {
+    try {
+      localStorage.setItem('mwk_player', JSON.stringify({
+        px: this.body.position.x, py: this.body.position.y, pz: this.body.position.z,
+        vx: this.body.velocity.x, vy: this.body.velocity.y, vz: this.body.velocity.z,
+        yaw: this.yaw, pitch: this.pitch, rcs: this.rcsEnabled,
+      }));
+    } catch {}
+  }
+
+  /**
+   * Restore a previously saved state from localStorage.
+   * No-op if there is no saved state or the data is malformed.
+   */
+  restoreState() {
+    try {
+      const raw = localStorage.getItem('mwk_player');
+      if (!raw) return;
+      const s = JSON.parse(raw);
+      this.body.position.set(s.px, s.py, s.pz);
+      this.body.surfaceNormal.copy(this.body.position).normalize();
+      this.body.velocity.set(s.vx, s.vy, s.vz);
+      this.yaw   = s.yaw   ?? 0;
+      this.pitch = s.pitch ?? 0;
+      this.rcsEnabled = s.rcs ?? false;
+      this._camRadius = this.body.position.length();
+      this._camUp.copy(this.body.surfaceNormal);
+      this._updateCameraTransform();
+    } catch {}
+  }
+
   dispose() {
     this._input.off('jump',          this._onJumpEvent);
     this._input.off('jumpRelease',   this._onJumpRelease);

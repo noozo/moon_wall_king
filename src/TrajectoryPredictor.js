@@ -29,10 +29,11 @@ const EYE_HEIGHT        = 1.8;    // game-units  (must match PhysicsBody)
 // Scratch vectors — zero allocations in update()
 // ---------------------------------------------------------------------------
 
-const _pos   = new THREE.Vector3();
-const _vel   = new THREE.Vector3();
-const _N     = new THREE.Vector3();
-const _accel = new THREE.Vector3();
+const _pos    = new THREE.Vector3();
+const _vel    = new THREE.Vector3();
+const _N      = new THREE.Vector3();
+const _accel  = new THREE.Vector3();
+const _thrust = new THREE.Vector3();
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -117,6 +118,10 @@ export class TrajectoryPredictor {
     _pos.copy(player.body.position);
     _vel.copy(player.body.velocity);
 
+    // Freeze the current thrust vector for the whole prediction window.
+    // This shows "where I'll go if I keep thrusting exactly like this."
+    player.getThrustVector(_thrust);
+
     const posArr = this._arc.geometry.attributes.position.array;
     const R      = this._moonRadius;
 
@@ -125,11 +130,11 @@ export class TrajectoryPredictor {
     let landX  = 0, landY = 0, landZ = 0;
 
     for (let i = 0; i < SIM_STEPS; i++) {
-      // Inverse-square lunar gravity (radially inward).
+      // Inverse-square lunar gravity (radially inward) + frozen RCS thrust.
       const dist = _pos.length();
       _N.copy(_pos).divideScalar(dist);
       const g = MOON_GRAV_SURFACE * (R / dist) * (R / dist);
-      _accel.copy(_N).multiplyScalar(-g);
+      _accel.copy(_N).multiplyScalar(-g).add(_thrust);
 
       // Semi-implicit Euler — matches PhysicsBody.integrate().
       _vel.addScaledVector(_accel, SIM_DT);

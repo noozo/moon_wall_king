@@ -218,6 +218,9 @@ async function boot() {
   const traj    = new TrajectoryPredictor(terrain, MOON_RADIUS, moonGroup);
   let   mode    = 'player';
 
+  // Restore the player's last position and orientation from the previous session.
+  player.restoreState();
+
   if (DEBUG) {
     mode = 'fly';
     flyCtrl.activate();
@@ -439,6 +442,7 @@ async function boot() {
 
   window.addEventListener('beforeunload', () => {
     running = false;
+    player.saveState();
     input.dispose();
     player.dispose();
     flyCtrl.dispose();
