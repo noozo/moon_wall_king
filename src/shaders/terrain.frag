@@ -194,12 +194,17 @@ void main() {
 
   float shadow = sampleCSMShadow(vWorldPos, diff);
 
+  // Hemisphere scatter: fills bump-shadowed faces on the dayside.  Not blocked
+  // by CSM because it represents light scattered across the wider sky dome, not
+  // the direct sun beam.  Matches the rock shader's wrapped-diffuse approach.
+  float hemi = moonNormSun * 0.08;
+
   float earthFace  = max(dot(bN, eDir), 0.0);
 
   // Earthshine: blue-tinted, visible on night side
   vec3 earthshine = vec3(0.45, 0.65, 1.0) * earthFace * 0.018;
 
-  float ambient = 0.02;
+  float ambient = 0.05;
 
   // --- Player spotlight ---------------------------------------------------
   // Light comes FROM the camera — no shadow map (co-located light/camera
@@ -222,7 +227,7 @@ void main() {
     }
   }
 
-  vec3 totalLight = vec3(diff * shadow + ambient) + vec3(spotLight);
+  vec3 totalLight = vec3(diff * shadow + hemi + ambient) + vec3(spotLight);
   gl_FragColor = vec4(albedo * totalLight + albedo * earthshine, 1.0);
 
   // Wireframe diagnostic mode (X key): override output with flat green.
