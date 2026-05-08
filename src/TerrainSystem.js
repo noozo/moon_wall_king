@@ -321,10 +321,18 @@ export class TerrainSystem {
    * Delegates to MoonData which does bilinear interpolation on the uint16 TIFF.
    */
   getHeightAt(nx, ny, nz) {
-    // Quantise to ~2 m bins: each component maps [-1,1] → [0,999].
-    const key = ((nx + 1) * 500 | 0) * 1_000_000
-              + ((ny + 1) * 500 | 0) * 1_000
-              + ((nz + 1) * 500 | 0);
+    // Quantise to ~0.5 m bins: each component maps [-1,1] → [0,4096).
+    //
+    // Resolution must be > 1 / eps where eps = 0.002 (the finite-difference
+    // step used in _buildMesh for analytical normals).  With 2048 steps per
+    // unit, the quantised shift for an eps-offset is ≥ 2048 × 0.002 × min_e
+    // where min_e is the smallest non-zero component of the tangent vector.
+    // A unit tangent vector (zero y-component for east) satisfies
+    // |ex|² + |ez|² = 1, so it cannot have BOTH |ex| < 0.244 AND |ez| < 0.244
+    // simultaneously — guaranteeing the key always changes across eps offsets.
+    const key = ((nx + 1) * 2048 | 0) * 16_777_216   // 4096²
+              + ((ny + 1) * 2048 | 0) * 4_096
+              + ((nz + 1) * 2048 | 0);
     let h = this._heightCache.get(key);
     if (h === undefined) {
       h = this._moonData.getElevationAt(nx, ny, nz);
